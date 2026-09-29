@@ -29,6 +29,7 @@ from datetime import timedelta
 from typing import Any
 
 import httpx
+import pytest
 import uvicorn
 from curie_api import crud
 from curie_api.config import get_settings
@@ -361,6 +362,16 @@ def test_uvicorn_ignores_forwarded_header_from_untrusted_peer(clean_db: None) ->
             )
             assert refused.status_code == 429, refused.text
             assert int(refused.headers["Retry-After"]) > 0
+
+
+@pytest.mark.parametrize("allowed_peers", ["*", "127.0.0.1,*"])
+def test_api_startup_rejects_wildcard_proxy_trust(
+    monkeypatch: pytest.MonkeyPatch, clean_db: None, allowed_peers: str
+) -> None:
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", allowed_peers)
+    with pytest.raises((ValueError, RuntimeError), match="FORWARDED_ALLOW_IPS"):
+        with TestClient(create_app()):
+            pass
 
 
 # --- the store's own properties -------------------------------------------

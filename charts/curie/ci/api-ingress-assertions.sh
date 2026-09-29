@@ -24,6 +24,8 @@
 #       hardcoded 8000 that drifts when api.service.port changes.
 #   (g) Uvicorn receives the configured trusted proxy address so its client
 #       address matches the ingress path used by console rate limiting.
+#   (h) Wildcard and universal CIDR values fail rendering so callers cannot
+#       spoof a new address to escape a console rate limit budget.
 set -euo pipefail
 
 CHART="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -128,4 +130,13 @@ if values != [sys.argv[2]]:
 PY
 done
 
-echo "api-ingress-assertions: all seven assertions passed"
+# (h) Reject each unsafe entry even when combined with a valid proxy address.
+for unsafe in '*' '0.0.0.0/0' '::/0'; do
+  if OUT="$(helm template curie "$CHART" --set-string "api.forwardedAllowIps=192.0.2.10/32\,$unsafe" -s templates/api.yaml 2>&1)"; then
+    fail h "api.forwardedAllowIps accepted $unsafe"
+  fi
+  grep -q 'api.forwardedAllowIps must name exact trusted proxy IPs or narrow CIDRs' <<<"$OUT" \
+    || fail h "the rejection of $unsafe did not name the required setting"
+done
+
+echo "api-ingress-assertions: all eight assertions passed"

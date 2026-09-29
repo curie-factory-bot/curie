@@ -5,6 +5,7 @@ startup and stored on app.state; dependencies (deps.py) read them per request.
 """
 
 import asyncio
+import ipaddress
 import logging
 import os
 import time
@@ -81,8 +82,28 @@ from .workitem_reconciler import WorkItemReconciler
 _LOG = logging.getLogger("curie_api")
 
 
+def _validate_forwarded_allow_ips() -> None:
+    """Refuse proxy trust settings that let a caller choose its own address."""
+    configured = os.environ.get("FORWARDED_ALLOW_IPS")
+    if configured is None:
+        return
+    for entry in configured.split(","):
+        trusted = entry.strip()
+        if trusted == "*":
+            raise RuntimeError("FORWARDED_ALLOW_IPS must not trust every address")
+        if "/" not in trusted:
+            continue
+        try:
+            network = ipaddress.ip_network(trusted, strict=False)
+        except ValueError:
+            continue
+        if network.prefixlen == 0:
+            raise RuntimeError("FORWARDED_ALLOW_IPS must not trust every address")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    _validate_forwarded_allow_ips()
     settings = get_settings()
     # Fail closed when this image cannot serve the live schema. Migrations are
     # applied by the upgrade Job / curie-migrate, never here (#2300).

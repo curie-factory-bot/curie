@@ -4,6 +4,12 @@
 {{- $connectorProxyPullSecrets = append $connectorProxyPullSecrets .name }}
 {{- end }}
 {{- if .Values.api.deploy }}
+{{- range $address := splitList "," .Values.api.forwardedAllowIps }}
+{{- $trusted := trim $address }}
+{{- if or (eq $trusted "*") (eq $trusted "0.0.0.0/0") (eq $trusted "::/0") }}
+{{- fail "api.forwardedAllowIps must name exact trusted proxy IPs or narrow CIDRs, not a wildcard or universal CIDR" }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
