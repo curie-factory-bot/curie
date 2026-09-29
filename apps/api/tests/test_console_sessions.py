@@ -19,18 +19,30 @@ the platform-key surface remains a separate administrative boundary.
 """
 
 import asyncio
+import secrets
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 
 from curie_api import crud
 from curie_api.config import get_settings
+from curie_api.main import create_app
 from curie_api.models import ConsoleSession
 from curie_api.routers.console import SESSION_COOKIE
-from sqlalchemy import select
+from fastapi.testclient import TestClient
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 SUBJECT = "U0EXAMPLE1"
+POST_SESSION_BUDGET = 30
+GET_SESSION_BUDGET = 120
+
+
+def _client_address() -> str:
+    """Give each test a fresh address inside the documentation IPv6 range."""
+
+    suffix = secrets.token_hex(8)
+    return "2001:db8::" + ":".join(suffix[index : index + 4] for index in range(0, 16, 4))
 
 
 def with_session[T](body: Callable[[AsyncSession], Awaitable[T]]) -> T:
@@ -142,6 +154,111 @@ def test_an_unknown_code_fails_identically_to_a_consumed_one(
     unknown = client.post("/console/session", json={"code": "not-a-real-code"})
     assert consumed.status_code == unknown.status_code == 401
     assert consumed.json()["detail"] == unknown.json()["detail"]
+
+
+def test_exchange_budget_is_shared_across_replicas_and_rejects_before_database(
+    clean_db: None, auth_headers: dict[str, str]
+) -> None:
+    address = _client_address()
+    with (
+        TestClient(create_app(), client=(address, 5000)) as first,
+        TestClient(create_app(), client=(address, 5001)) as second,
+    ):
+        minted = first.post(
+            "/console/login-codes", json={"subject": SUBJECT}, headers=auth_headers
+        )
+        assert minted.status_code == 201, minted.text
+        code = minted.json()["code"]
+
+        for index in range(POST_SESSION_BUDGET):
+            replica = first if index % 2 == 0 else second
+            # Header values are attacker controlled. The ASGI server supplies
+            # the client address after applying its trusted proxy policy.
+            response = replica.post(
+                "/console/session",
+                json={"code": "not-a-real-code"},
+                headers={"X-Forwarded-For": _client_address()},
+            )
+            assert response.status_code == 401, response.text
+
+        statements: list[str] = []
+
+        def observed_query(
+            _connection: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            statements.append(statement)
+
+        engine = second.app.state.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", observed_query)
+        try:
+            refused = second.post(
+                "/console/session",
+                json={"code": code},
+                headers={"X-Forwarded-For": _client_address()},
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", observed_query)
+        assert refused.status_code == 429, refused.text
+        assert int(refused.headers["Retry-After"]) > 0
+        assert not statements, statements
+
+        # The rejected request did not consume the code. A second client can
+        # still complete the ordinary exchange through the same application.
+        with TestClient(create_app(), client=(_client_address(), 5002)) as other:
+            exchanged = other.post("/console/session", json={"code": code})
+            assert exchanged.status_code == 200, exchanged.text
+            assert exchanged.json()["subject"] == SUBJECT
+            token = other.cookies.get(SESSION_COOKIE)
+            assert token
+            current = other.get(
+                "/console/session", headers={"Cookie": f"{SESSION_COOKIE}={token}"}
+            )
+            assert current.status_code == 200, current.text
+            assert current.json()["subject"] == SUBJECT
+
+
+def test_current_session_budget_is_shared_across_replicas_and_rejects_before_database(
+    clean_db: None,
+) -> None:
+    address = _client_address()
+    with (
+        TestClient(create_app(), client=(address, 5000)) as first,
+        TestClient(create_app(), client=(address, 5001)) as second,
+    ):
+        for index in range(GET_SESSION_BUDGET):
+            replica = first if index % 2 == 0 else second
+            response = replica.get("/console/session")
+            assert response.status_code == 401, response.text
+
+        statements: list[str] = []
+
+        def observed_query(
+            _connection: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            statements.append(statement)
+
+        engine = second.app.state.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", observed_query)
+        try:
+            refused = second.get("/console/session")
+        finally:
+            event.remove(engine, "before_cursor_execute", observed_query)
+        assert refused.status_code == 429, refused.text
+        assert int(refused.headers["Retry-After"]) > 0
+        assert not statements, statements
+
+        with TestClient(create_app(), client=(_client_address(), 5002)) as other:
+            assert other.get("/console/session").status_code == 401
 
 
 # --- the store's own properties -------------------------------------------
