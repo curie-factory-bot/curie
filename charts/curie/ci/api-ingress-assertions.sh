@@ -7,7 +7,7 @@
 # webhooks to it. Without TLS both cross the network in the clear.
 #
 # The failure this guards against is not "TLS is missing" -- it is an Ingress
-# that LOOKS configured and protects nothing. Six assertions:
+# that LOOKS configured and protects nothing. Seven assertions:
 #
 #   (a) Off by default. An ingress needs a controller, a hostname and a cert
 #       source; none can be invented, so a default-on ingress would render an
@@ -22,6 +22,8 @@
 #       that looks like a missing certificate rather than a config error.
 #   (f) The backend points at the api Service and its configured port, not a
 #       hardcoded 8000 that drifts when api.service.port changes.
+#   (g) Uvicorn receives the configured trusted proxy address so its client
+#       address matches the ingress path used by console rate limiting.
 set -euo pipefail
 
 CHART="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -93,4 +95,37 @@ if not b["name"].endswith("-api"):
     sys.exit(1)
 PY
 
-echo "api-ingress-assertions: all six assertions passed"
+# (g) Check the API container environment, not an unrelated workload or a
+# similarly named value elsewhere in the rendered chart.
+for pair in '127.0.0.1 127.0.0.1' '192.0.2.10/32 192.0.2.10/32'; do
+  read -r configured expected <<<"$pair"
+  if [[ "$configured" == '127.0.0.1' ]]; then
+    OUT="$(render -s templates/api.yaml)"
+  else
+    OUT="$(render --set-string "api.forwardedAllowIps=$configured" -s templates/api.yaml)"
+  fi
+  python3 - "$OUT" "$expected" <<'PY' || exit 1
+import sys
+
+import yaml
+
+deployments = [
+    document for document in yaml.safe_load_all(sys.argv[1])
+    if document and document.get("kind") == "Deployment"
+]
+if len(deployments) != 1:
+    raise SystemExit(f"FAIL [g] expected one API Deployment, found {len(deployments)}")
+containers = deployments[0]["spec"]["template"]["spec"]["containers"]
+api = [container for container in containers if container["name"] == "api"]
+if len(api) != 1:
+    raise SystemExit(f"FAIL [g] expected one API container, found {len(api)}")
+values = [
+    entry.get("value") for entry in api[0]["env"]
+    if entry["name"] == "FORWARDED_ALLOW_IPS"
+]
+if values != [sys.argv[2]]:
+    raise SystemExit(f"FAIL [g] FORWARDED_ALLOW_IPS rendered {values!r}, expected {[sys.argv[2]]!r}")
+PY
+done
+
+echo "api-ingress-assertions: all seven assertions passed"

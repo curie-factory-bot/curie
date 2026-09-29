@@ -27,12 +27,13 @@ the operator exchanges a new login code.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 
 from .. import crud
 from ..approval_auth import CONSOLE_SESSION_COOKIE, set_console_session_cookie
 from ..auth import require_platform_key
 from ..deps import SessionDep
+from ..rate_limit import require_rate_limit
 from ..schemas import (
     ConsoleLoginCodeMint,
     ConsoleLoginCodeOut,
@@ -46,6 +47,14 @@ router = APIRouter(prefix="/console", tags=["console"])
 #: makes this strictly stronger than the status quo: page script cannot read it,
 #: so injected script cannot exfiltrate the credential it authenticates with.
 SESSION_COOKIE = CONSOLE_SESSION_COOKIE
+
+
+async def limit_session_exchange(request: Request) -> None:
+    await require_rate_limit(request, route="console_session_post", limit=30, window_seconds=60)
+
+
+async def limit_current_session(request: Request) -> None:
+    await require_rate_limit(request, route="console_session_get", limit=120, window_seconds=60)
 
 
 @router.post(
@@ -67,7 +76,9 @@ async def create_login_code(
     )
 
 
-@router.post("/session", response_model=ConsoleSessionOut)
+@router.post(
+    "/session", response_model=ConsoleSessionOut, dependencies=[Depends(limit_session_exchange)]
+)
 async def exchange_login_code(
     data: ConsoleSessionExchange, response: Response, session: SessionDep
 ) -> ConsoleSessionOut:
@@ -98,7 +109,9 @@ async def exchange_login_code(
     return ConsoleSessionOut(subject=row.subject, expires_at=row.session_expires_at)
 
 
-@router.get("/session", response_model=ConsoleSessionOut)
+@router.get(
+    "/session", response_model=ConsoleSessionOut, dependencies=[Depends(limit_current_session)]
+)
 async def current_session(
     session: SessionDep,
     response: Response,

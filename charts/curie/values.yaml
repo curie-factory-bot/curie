@@ -1184,6 +1184,13 @@ api:
   # Left at `dev` so a bare `helm install` and the dev overlays boot without
   # real secrets; set to `prod` (with real secrets) for a production install.
   environment: dev
+  # Uvicorn accepts forwarding headers only from these immediate proxy source
+  # addresses. The loopback default prevents clients from spoofing their IP.
+  # To give console users separate rate limits, set the exact UI proxy pod IPs
+  # or trusted proxy CIDRs as seen by the API. Never use "*" or a CIDR that
+  # includes untrusted clients or workloads. With the default, console requests
+  # share the UI proxy's address and therefore share one rate limit budget.
+  forwardedAllowIps: "127.0.0.1"
   # Single shared API key the UI and CLI authenticate with. Dev default; override
   # (or point at an existingSecret) in any shared deployment.
   apiKey: curie-dev-key

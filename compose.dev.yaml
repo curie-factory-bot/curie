@@ -407,6 +407,10 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/postgres
       DB_SCHEMA: curie
       API_KEY: curie-dev-key
+      # Trust only the API container's loopback by default. Set the exact UI
+      # proxy source IPs or trusted CIDRs to separate console client budgets.
+      # Never use "*" or a range containing untrusted clients or workloads.
+      FORWARDED_ALLOW_IPS: ${CURIE_API_FORWARDED_ALLOW_IPS:-127.0.0.1}
       # Dedicated Slack approval-principal attestation key. It is independent
       # from API_KEY so an administrator holding the platform key cannot forge
       # the authenticated Slack identity/channel evidence accepted by the API.

@@ -20,10 +20,16 @@ the platform-key surface remains a separate administrative boundary.
 
 import asyncio
 import secrets
-from collections.abc import Awaitable, Callable
+import socket
+import threading
+import time
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from typing import Any
 
+import httpx
+import uvicorn
 from curie_api import crud
 from curie_api.config import get_settings
 from curie_api.main import create_app
@@ -43,6 +49,47 @@ def _client_address() -> str:
 
     suffix = secrets.token_hex(8)
     return "2001:db8::" + ":".join(suffix[index : index + 4] for index in range(0, 16, 4))
+
+
+@contextmanager
+def _served_with_proxy_trust(trusted_peer: str) -> Iterator[str]:
+    """Serve the real API through Uvicorn's proxy header middleware."""
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(64)
+    url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_app(),
+            proxy_headers=True,
+            forwarded_allow_ips=trusted_peer,
+            log_level="warning",
+            access_log=False,
+        )
+    )
+    thread = threading.Thread(
+        target=lambda: asyncio.run(server.serve(sockets=[sock])), daemon=True
+    )
+    try:
+        thread.start()
+        deadline = time.monotonic() + 30
+        while not server.started:
+            assert thread.is_alive(), "the API server exited during startup"
+            assert time.monotonic() < deadline, "the API server did not start"
+            time.sleep(0.05)
+        yield url
+    finally:
+        server.should_exit = True
+        thread.join(timeout=15)
+        sock.close()
+        assert not thread.is_alive(), "the API server did not stop"
+
+
+def _loopback_peer() -> str:
+    """A private source address prevents rate limit state from crossing tests."""
+
+    return f"127.{secrets.randbelow(254) + 1}.{secrets.randbelow(256)}.{secrets.randbelow(254) + 1}"
 
 
 def with_session[T](body: Callable[[AsyncSession], Awaitable[T]]) -> T:
@@ -259,6 +306,61 @@ def test_current_session_budget_is_shared_across_replicas_and_rejects_before_dat
 
         with TestClient(create_app(), client=(_client_address(), 5002)) as other:
             assert other.get("/console/session").status_code == 401
+
+
+def test_uvicorn_trusted_proxy_uses_the_actual_forwarded_client(
+    clean_db: None,
+) -> None:
+    peer = _loopback_peer()
+    actual_client = _client_address()
+    other_client = _client_address()
+    with _served_with_proxy_trust(peer) as url:
+        transport = httpx.HTTPTransport(local_address=peer)
+        with httpx.Client(base_url=url, transport=transport, timeout=5) as http:
+            for _ in range(POST_SESSION_BUDGET):
+                response = http.post(
+                    "/console/session",
+                    json={"code": "not-a-real-code"},
+                    headers={"X-Forwarded-For": f"{_client_address()}, {actual_client}"},
+                )
+                assert response.status_code == 401, response.text
+
+            refused = http.post(
+                "/console/session",
+                json={"code": "not-a-real-code"},
+                headers={"X-Forwarded-For": f"{_client_address()}, {actual_client}"},
+            )
+            assert refused.status_code == 429, refused.text
+            assert int(refused.headers["Retry-After"]) > 0
+
+            independent = http.post(
+                "/console/session",
+                json={"code": "not-a-real-code"},
+                headers={"X-Forwarded-For": f"{_client_address()}, {other_client}"},
+            )
+            assert independent.status_code == 401, independent.text
+
+
+def test_uvicorn_ignores_forwarded_header_from_untrusted_peer(clean_db: None) -> None:
+    peer = _loopback_peer()
+    with _served_with_proxy_trust("192.0.2.1") as url:
+        transport = httpx.HTTPTransport(local_address=peer)
+        with httpx.Client(base_url=url, transport=transport, timeout=5) as http:
+            for _ in range(POST_SESSION_BUDGET):
+                response = http.post(
+                    "/console/session",
+                    json={"code": "not-a-real-code"},
+                    headers={"X-Forwarded-For": _client_address()},
+                )
+                assert response.status_code == 401, response.text
+
+            refused = http.post(
+                "/console/session",
+                json={"code": "not-a-real-code"},
+                headers={"X-Forwarded-For": _client_address()},
+            )
+            assert refused.status_code == 429, refused.text
+            assert int(refused.headers["Retry-After"]) > 0
 
 
 # --- the store's own properties -------------------------------------------
