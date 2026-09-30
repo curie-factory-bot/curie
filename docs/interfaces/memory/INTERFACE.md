@@ -84,17 +84,22 @@ reached with the same memory token:
 - **Channel memory**, at `CURIE_CHANNEL_MEMORY_REF`
   (`BootEnv.channel_memory_ref`), the binding-scoped namespace
   `.../agents/<id>/state/bindings/<kind>/<address>/memory`. The worker sets it
-  only when the agent's `memory_writes` setting is on and the turn has a
-  binding, and never on an eval-isolated turn.
+  whenever the turn has a binding, whether memory writes are on or off, and
+  never on an eval-isolated turn. Alongside it the worker sends
+  `CURIE_MEMORY_WRITES` (`BootEnv.memory_writes`), `1` or `0` from the agent's
+  `memory_writes` setting; it is never sent without a channel ref.
 
 At boot the runner lists whichever of the two it was given and renders a
 "Remembered facts" block (agent facts, then channel facts, newest first, at
 most 200 per memory, each statement flattened to one line and framed as data,
-not instructions) after the legacy log preamble. With memory writes off no
-channel ref is minted, so only agent facts are loaded. When
-`CURIE_CHANNEL_MEMORY_REF` is set it also mounts `remember`, `update` and
-`forget` on the platform `curie` server and injects the guidance block
-(`guidance` if stored, else `DEFAULT_GUIDANCE`) before the bundle prompt. The
+not instructions) after the legacy log preamble. Reading memory needs no
+switch: with memory writes off, both agent and channel facts still load. Only
+when writes are on does it also mount `remember`, `update` and `forget` on the
+platform `curie` server and inject the guidance block (`guidance` if stored,
+else `DEFAULT_GUIDANCE`) before the bundle prompt. Writes are on when
+`CURIE_MEMORY_WRITES` is `1`, or when it is absent and
+`CURIE_CHANNEL_MEMORY_REF` is set (an older worker, which only sent the ref
+with writes on). The
 tools take `memory: agent|channel`; the author is the turn's sender, never a
 tool argument. A write the state API refuses at its cap is reported to the model
 as refused. The tools are exempt from bundle toolPolicy by published name, and
