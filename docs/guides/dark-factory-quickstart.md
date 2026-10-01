@@ -35,10 +35,9 @@ separate trusted job with your GitHub App's identity.
 |---|---|
 | Docker | kind nodes, the local registry, the runner layer build |
 | `kind` v0.24 or later, `kubectl`, `helm` | the local cluster. kind's network plugin enforces NetworkPolicy from v0.24, which the sandbox lockdown relies on. |
-| `jq` | building the GitHub egress values in Step 6 |
 | `cloudflared` | a public URL for the GitHub webhook |
 | `gh` | creating the repository, label and issue (the web UI works too) |
-| `curie` v0.11.1 or later | install and deploy ([releases](https://github.com/curie-eng/curie/releases)) |
+| `curie` v0.11.2 or later | install and deploy ([releases](https://github.com/curie-eng/curie/releases)) |
 | An [OpenRouter](https://openrouter.ai/) API key | the factory model, `z-ai/glm-5.3-flash` by default |
 | A GitHub account | your own GitHub App and the trial repository |
 
@@ -132,7 +131,7 @@ GitHub Apps** with access to the trial repository.
 
 ## Step 3: Start a kind cluster with a local registry
 
-The factory agent runs on a runner image layer you build in Step 7, and Curie
+The factory agent runs on a runner image layer you build in Step 6, and Curie
 only deploys a layer by registry digest, so kind needs a registry it can pull
 from ([#3619](https://github.com/curie-eng/curie/issues/3619) tracks removing
 this wiring).
@@ -268,40 +267,14 @@ Point the App at it: on the App's settings page set **Webhook URL** to
 **You should now see** `curl -s -o /dev/null -w '%{http_code}\n' "$TUNNEL_URL/health"`
 print `200`.
 
-## Step 6: Let the agent reach the GitHub API
-
-The sandbox has no network access by default. The agent reads its issue
-through the GitHub MCP server, so open egress to GitHub's API addresses. A
-NetworkPolicy matches addresses, not names, so the list comes from
-`https://api.github.com/meta`. `cluster up` has no values file option yet, so
-this one step uses `helm` directly with the chart `cluster up` installed:
-
-```bash
-set -o pipefail
-curl -fsSL https://api.github.com/meta \
-  | jq -r '"agentSandbox:\n  connectorEgress:\n    dark-factory:",
-           (.api[] | select(contains(":") | not)
-             | "      - { cidr: \"\(.)\", ports: [{ protocol: TCP, port: 443 }] }")' \
-  > factory-egress.yaml
-grep -c cidr factory-egress.yaml   # must be more than 0
-
-gh release download v0.11.1 -R curie-eng/curie -p 'curie-0.11.1.tgz'
-helm upgrade curie curie-0.11.1.tgz -n curie --kube-context kind-curie-factory \
-  --reuse-values --timeout 21900s -f factory-egress.yaml
-```
-
-Use the chart that matches your `curie --version`.
-
-**You should now see** `STATUS: deployed` from Helm.
-
-## Step 7: Build and deploy the factory agent
+## Step 6: Build and deploy the factory agent
 
 The agent is the [`examples/dark-factory`](../../examples/dark-factory/README.md)
 bundle. Fetch it from the release source archive, no clone needed:
 
 ```bash
-curl -fsSL https://github.com/curie-eng/curie/archive/refs/tags/v0.11.1.tar.gz \
-  | tar xz --strip-components=2 curie-0.11.1/examples/dark-factory
+curl -fsSL https://github.com/curie-eng/curie/archive/refs/tags/v0.11.2.tar.gz \
+  | tar xz --strip-components=2 curie-0.11.2/examples/dark-factory
 ```
 
 The bundle builds its runner layer for two architectures, which Docker's
@@ -317,17 +290,12 @@ grep platforms dark-factory/connectors.yaml
 curie build --plugin-dir dark-factory --registry localhost:5001/curie
 ```
 
-The bundle needs its own GitHub token to read the issue and, after a failed
-review, post its findings. Create a
-[fine-grained personal access token](https://github.com/settings/personal-access-tokens/new)
-limited to the trial repository with **Issues: Read and write** and nothing
-else. It is visible to code in the sandbox, so keep it that narrow.
+The bundle needs no GitHub token: the platform reads the issue for it with
+your App.
 
 ```bash
-export GITHUB_PERSONAL_ACCESS_TOKEN=<fine-grained-token>
 curie cluster deploy --context kind-curie-factory --plugin-dir dark-factory \
-  --agent dark-factory --env prod --repo "$REPO" \
-  --secret GITHUB_PERSONAL_ACCESS_TOKEN
+  --agent dark-factory --env prod --repo "$REPO"
 ```
 
 `cluster deploy` warns `push delivery is NOT armed`. That is about deploying
@@ -355,7 +323,7 @@ Curie itself.
 **You should now see** `deployed dark-factory ... -> prod`, and the surfaces
 line list `github:<owner>/curie-factory-quickstart`.
 
-## Step 8: Label an issue
+## Step 7: Label an issue
 
 ```bash
 gh issue create -R "$REPO" -t 'Add a hello() function' -b \
@@ -385,7 +353,7 @@ repository. Anyone else's label is ignored.
 
    lists the issue as `waiting` (for sandbox capacity), then `running`.
 
-## Step 9: Read the result
+## Step 8: Read the result
 
 The agent works through nine phases: read the issue, pin the criteria, plan,
 plan review, a failing test, implement, diff review, publish, and wait for CI.
@@ -463,7 +431,7 @@ label.
 | `403` when installing the App on a repository through the API | GitHub refuses that call for a user token | Install it in the web UI (Step 2) |
 | `curie-api` crash loops after `cluster up` | Intake is on but a required value is missing | `kubectl -n curie logs deploy/curie-api` names it; set it and rerun `cluster up` |
 | `cluster up` fails on `Job/curie-preflight-gvisor` | A stale preflight Job on kind ([#3618](https://github.com/curie-eng/curie/issues/3618)) | `kubectl -n curie delete job curie-preflight-gvisor`, then rerun |
-| `curie build` fails with `Multi-platform build is not supported` | Docker's default driver builds one platform | Edit `platforms` in `connectors.yaml` (Step 7) |
+| `curie build` fails with `Multi-platform build is not supported` | Docker's default driver builds one platform | Edit `platforms` in `connectors.yaml` (Step 6) |
 | Work item stays `waiting for sandbox capacity` | Another run holds the sandbox, or the runner pod cannot start | `kubectl -n curie get pods`; the run starts when capacity frees |
 | Status comment ends with `Could not complete:` | The run stopped; the comment's `Cause:` and `Details:` lines say why | Fix the cause, then relabel |
 | Run ends `ci_unverified` | The App cannot read Checks or Commit statuses | Grant both, accept the new permissions on the installation, relabel |
