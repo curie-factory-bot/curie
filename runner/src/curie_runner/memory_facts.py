@@ -18,9 +18,10 @@ operator's replacement for ``DEFAULT_GUIDANCE``).
 The model writes facts through three tools on the platform ``curie`` server:
 ``remember``, ``update`` and ``forget`` (built in ``approval.py``, which owns
 that server; this module stays free of the harness SDK). The runner mounts them only when the
-worker set a channel memory ref, which it does only when an operator turned
-memory writes on for the agent. The author of a fact is the person who sent the
-turn's message, never a model-supplied value.
+worker set a channel memory ref and memory writes are on for the agent. With
+writes off the channel facts are still read, and ``WRITES_OFF_NOTICE`` takes the
+guidance's place. The author of a fact is the person who sent the turn's
+message, never a model-supplied value.
 """
 
 from __future__ import annotations
@@ -61,6 +62,14 @@ Don't remember descriptions of people beyond their role, data and figures that b
 Agent memory: don't save anything here.
 
 Use remember for a new fact, update to change a fact by its id, and forget to remove one. Save one fact per call."""  # noqa: E501
+
+# Shown where the guidance would go when a turn has channel memory but writes
+# are off (#3621). The agent has no memory tools then, so it must not claim to
+# have kept anything.
+WRITES_OFF_NOTICE = """\
+Memory
+
+Saving memory is turned off for this agent. What is said here will not be kept for later conversations. Never say that you saved, noted or will remember something."""  # noqa: E501
 
 # The longest statement the tools accept (#1461 review F4), and how many facts
 # per memory boot puts in the prompt, newest first.
